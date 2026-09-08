@@ -1,0 +1,16 @@
+[package]
+name = "cgc"
+version = "0.1.0"
+edition = "2021"
+description = "Check git changes: uncommitted work and unpushed branches across every repo under a directory"
+repository = "https://github.com/OwnWeb/check-git-changes"
+readme = "README.md"
+license = "MIT"
+
+[dependencies]
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
