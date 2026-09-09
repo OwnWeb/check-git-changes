@@ -19,7 +19,7 @@ const SKIP_DIRS: &[&str] = &[
     "build",
 ];
 const UNTRACKED_SIZE_LIMIT_BYTES: u64 = 1 << 20;
-/// ponytail: recursion depth cap, raise it if someone nests repos deeper than this.
+/// Bounds the recursion: raise it if repos ever nest deeper than this.
 const MAX_SCAN_DEPTH: usize = 32;
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 60 * SECONDS_PER_MINUTE;
@@ -338,7 +338,7 @@ fn split_nul(output: &str) -> impl Iterator<Item = &str> {
 }
 
 fn count_lines(path: &Path) -> u64 {
-    // ponytail: huge untracked blobs count as a file but not as lines, reading them would dominate runtime.
+    // Huge untracked blobs count as a file but not as lines: reading them would dominate runtime.
     let Ok(metadata) = std::fs::metadata(path) else {
         return 0;
     };
