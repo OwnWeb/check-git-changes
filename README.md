@@ -1,5 +1,7 @@
 # cgc
 
+[![CI](https://github.com/OwnWeb/check-git-changes/actions/workflows/ci.yml/badge.svg)](https://github.com/OwnWeb/check-git-changes/actions/workflows/ci.yml)
+
 Shows, across every git repo under a directory: the changes you have not committed, and the
 branches you have not pushed. Both filtered to a time window, 24 hours by default.
 
@@ -26,6 +28,18 @@ orgC/repoE                         1 file  +1 -0    chore/deps ahead 1, +1 more 
 * macOS or Linux. The interactive mode drives the terminal through `stty`, so Windows is out.
 
 ## Install
+
+Download a binary from the [latest release](https://github.com/OwnWeb/check-git-changes/releases/latest):
+
+```sh
+# macOS on Apple silicon; swap for x86_64-apple-darwin or x86_64-unknown-linux-musl
+curl -fsSL https://github.com/OwnWeb/check-git-changes/releases/latest/download/cgc-v0.1.0-aarch64-apple-darwin.tar.gz | tar -xz
+mv cgc /usr/local/bin/
+```
+
+The Linux build is statically linked against musl, so it does not care about the host glibc.
+
+### From source
 
 Build the binary and copy it into `~/.cargo/bin`:
 

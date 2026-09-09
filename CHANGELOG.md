@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- GitHub actions bumped off the Node 20 runtime.
+
 ## [0.1.0] 2026-09-09
 
 First version.
