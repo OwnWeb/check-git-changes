@@ -19,6 +19,8 @@ const SKIP_DIRS: &[&str] = &[
     "build",
 ];
 const UNTRACKED_SIZE_LIMIT_BYTES: u64 = 1 << 20;
+/// ponytail: recursion depth cap, raise it if someone nests repos deeper than this.
+const MAX_SCAN_DEPTH: usize = 32;
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 60 * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
@@ -164,7 +166,7 @@ fn main() {
 
     let started = Instant::now();
     let mut repos = Vec::new();
-    collect_repos(&options.root, &mut repos);
+    collect_repos(&options.root, MAX_SCAN_DEPTH, &mut repos);
     let mut reports: Vec<RepoReport> = repos
         .par_iter()
         .map(|repo| scan_repo(repo, cutoff))
@@ -223,7 +225,10 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0)
 }
 
-fn collect_repos(dir: &Path, found: &mut Vec<PathBuf>) {
+fn collect_repos(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
     if dir.join(".git").exists() {
         found.push(dir.to_path_buf());
         return;
@@ -241,7 +246,7 @@ fn collect_repos(dir: &Path, found: &mut Vec<PathBuf>) {
         if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
             continue;
         }
-        collect_repos(&entry.path(), found);
+        collect_repos(&entry.path(), depth - 1, found);
     }
 }
 
@@ -272,15 +277,16 @@ fn scan_repo(repo: &Path, cutoff: u64) -> RepoReport {
 fn scan_working_tree(repo: &Path, cutoff: u64) -> WorkingTreeChanges {
     let mut changes = WorkingTreeChanges { files: Vec::new(), last_change: None };
 
-    let tracked = git(repo, &["diff", "--numstat", "--no-renames", "HEAD"]).unwrap_or_default();
-    for line in tracked.lines() {
-        let mut fields = line.splitn(3, '\t');
+    let tracked =
+        git(repo, &["diff", "--numstat", "--no-renames", "-z", "HEAD"]).unwrap_or_default();
+    for record in split_nul(&tracked) {
+        let mut fields = record.splitn(3, '\t');
         let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
         let full_path = repo.join(path);
-        let Some(changed_at) = change_time(&full_path, cutoff) else {
+        let Some(changed_at) = change_time(&full_path, repo, cutoff) else {
             continue;
         };
         changes.files.push(ChangedFile {
@@ -293,10 +299,11 @@ fn scan_working_tree(repo: &Path, cutoff: u64) -> WorkingTreeChanges {
         changes.last_change = changes.last_change.max(Some(changed_at));
     }
 
-    let untracked = git(repo, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
-    for path in untracked.lines() {
+    let untracked =
+        git(repo, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
+    for path in split_nul(&untracked) {
         let full_path = repo.join(path);
-        let Some(changed_at) = change_time(&full_path, cutoff) else {
+        let Some(changed_at) = change_time(&full_path, repo, cutoff) else {
             continue;
         };
         changes.files.push(ChangedFile {
@@ -312,14 +319,22 @@ fn scan_working_tree(repo: &Path, cutoff: u64) -> WorkingTreeChanges {
     changes
 }
 
-fn change_time(path: &Path, cutoff: u64) -> Option<u64> {
+fn change_time(path: &Path, repo: &Path, cutoff: u64) -> Option<u64> {
     // A deleted file has no mtime of its own, so fall back to the nearest surviving
-    // ancestor: removing an entry updates the mtime of the directory holding it.
+    // ancestor: removing an entry updates the mtime of the directory holding it. The walk
+    // stops at the repo, above which a directory says nothing about this repo.
     let modified = path
         .ancestors()
+        .take_while(|ancestor| ancestor.starts_with(repo))
         .find_map(|ancestor| std::fs::metadata(ancestor).and_then(|entry| entry.modified()).ok())?;
     let seconds = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
     (seconds >= cutoff).then_some(seconds)
+}
+
+/// Git leaves a NUL terminated path verbatim, where its line output quotes any path
+/// holding a quote, a backslash or a control character.
+fn split_nul(output: &str) -> impl Iterator<Item = &str> {
+    output.split('\0').filter(|record| !record.is_empty())
 }
 
 fn count_lines(path: &Path) -> u64 {
@@ -826,6 +841,17 @@ mod tests {
 
         let single = ["a-very-long-branch-name-on-its-own ahead 12".to_string()];
         assert_eq!(join_within_width(&single, 20), single[0]);
+    }
+
+    #[test]
+    fn keeps_the_paths_git_would_have_quoted() {
+        let numstat = "1\t0\tplain.txt\u{0}2\t1\twe\"ird.txt\u{0}\n";
+        assert_eq!(
+            split_nul(numstat).collect::<Vec<_>>(),
+            ["1\t0\tplain.txt", "2\t1\twe\"ird.txt", "\n"]
+        );
+        assert_eq!(split_nul("new\"file.txt\u{0}").collect::<Vec<_>>(), ["new\"file.txt"]);
+        assert_eq!(split_nul("").next(), None);
     }
 
     #[test]
