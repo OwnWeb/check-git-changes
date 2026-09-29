@@ -474,7 +474,7 @@ impl Browser {
 
     fn stage_args(&self, target: usize) -> Vec<String> {
         if !self.has_selected_files(target) {
-            return vec!["add".to_string(), "--all".to_string()];
+            return stage_all_args(&self.reports[target].changes.nested_repos);
         }
         let mut args = vec!["add".to_string(), "--".to_string()];
         args.extend(self.files_to_commit(target).iter().map(|file| file.path.clone()));
@@ -582,6 +582,14 @@ impl Browser {
         self.selections = selections;
         self.cursor = self.cursor.min(self.reports.len().saturating_sub(1));
     }
+}
+
+/// `add --all` would record a nested repo as an embedded gitlink, never what a commit of
+/// everything means.
+fn stage_all_args(nested_repos: &[String]) -> Vec<String> {
+    let mut args = vec!["add".to_string(), "--all".to_string(), "--".to_string()];
+    args.extend(nested_repos.iter().map(|path| format!(":(exclude,literal){path}")));
+    args
 }
 
 fn diff_file_args(file: &ChangedFile) -> Vec<String> {
@@ -792,6 +800,15 @@ mod tests {
         assert_eq!(
             log_branch_args(&branch("feat/x", None)),
             ["log", "--stat", "feat/x", "--not", "--remotes"]
+        );
+    }
+
+    #[test]
+    fn stages_everything_but_nested_repos() {
+        assert_eq!(stage_all_args(&[]), ["add", "--all", "--"]);
+        assert_eq!(
+            stage_all_args(&[".claude/worktrees/[wip]".to_string()]),
+            ["add", "--all", "--", ":(exclude,literal).claude/worktrees/[wip]"]
         );
     }
 

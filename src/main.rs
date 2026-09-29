@@ -80,6 +80,7 @@ impl ChangedFile {
 
 struct WorkingTreeChanges {
     files: Vec<ChangedFile>,
+    nested_repos: Vec<String>,
     last_change: Option<u64>,
 }
 
@@ -165,8 +166,12 @@ fn main() {
     let cutoff = now_unix().saturating_sub(period_seconds);
 
     let started = Instant::now();
+    // Git records worktree paths resolved, so the root is too, or the two would not compare.
+    let root = std::fs::canonicalize(&options.root).unwrap_or(options.root);
     let mut repos = Vec::new();
-    collect_repos(&options.root, MAX_SCAN_DEPTH, &mut repos);
+    collect_repos(&root, MAX_SCAN_DEPTH, &mut repos);
+    repos.sort();
+    repos.dedup();
     let mut reports: Vec<RepoReport> = repos
         .par_iter()
         .map(|repo| scan_repo(repo, cutoff))
@@ -175,7 +180,7 @@ fn main() {
     reports.sort_by_key(|report| std::cmp::Reverse(report.last_activity()));
 
     let context = ScanContext {
-        root: options.root,
+        root,
         cutoff,
         scanned: repos.len(),
         period: options.period,
@@ -231,6 +236,7 @@ fn collect_repos(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     }
     if dir.join(".git").exists() {
         found.push(dir.to_path_buf());
+        found.extend(linked_worktrees(dir));
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -250,6 +256,35 @@ fn collect_repos(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Worktrees are found through the repo that owns them, wherever they are checked out: the walk
+/// skips dotted directories such as `.claude/worktrees` and never enters a repo.
+fn linked_worktrees(repo: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(repo.join(".git").join("worktrees")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pointer = std::fs::read_to_string(entry.path().join("gitdir")).ok()?;
+            // Fails on a worktree deleted without `git worktree remove`, which drops it.
+            let dot_git = std::fs::canonicalize(entry.path().join(pointer.trim_end())).ok()?;
+            dot_git.parent().map(Path::to_path_buf)
+        })
+        .collect()
+}
+
+/// A linked worktree has a `.git` file pointing at a git dir that holds `commondir`, where a
+/// submodule's points at one that does not.
+fn is_linked_worktree(repo: &Path) -> bool {
+    let Ok(pointer) = std::fs::read_to_string(repo.join(".git")) else {
+        return false;
+    };
+    pointer
+        .trim_end()
+        .strip_prefix("gitdir: ")
+        .is_some_and(|git_dir| repo.join(git_dir).join("commondir").exists())
+}
+
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -267,15 +302,20 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn scan_repo(repo: &Path, cutoff: u64) -> RepoReport {
+    // Branches belong to the main repo, whose row lists them. A worktree scanned without its
+    // main repo therefore shows none: widen DIR to include the main repo.
+    let unpushed_branches =
+        if is_linked_worktree(repo) { Vec::new() } else { scan_branches(repo, cutoff) };
     RepoReport {
         path: repo.to_path_buf(),
         changes: scan_working_tree(repo, cutoff),
-        unpushed_branches: scan_branches(repo, cutoff),
+        unpushed_branches,
     }
 }
 
 fn scan_working_tree(repo: &Path, cutoff: u64) -> WorkingTreeChanges {
-    let mut changes = WorkingTreeChanges { files: Vec::new(), last_change: None };
+    let mut changes =
+        WorkingTreeChanges { files: Vec::new(), nested_repos: Vec::new(), last_change: None };
 
     let tracked =
         git(repo, &["diff", "--numstat", "--no-renames", "-z", "HEAD"]).unwrap_or_default();
@@ -302,6 +342,11 @@ fn scan_working_tree(repo: &Path, cutoff: u64) -> WorkingTreeChanges {
     let untracked =
         git(repo, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
     for path in split_nul(&untracked) {
+        // A trailing slash is how git lists a nested repo, such as a worktree, without entering it.
+        if let Some(nested_repo) = path.strip_suffix('/') {
+            changes.nested_repos.push(nested_repo.to_string());
+            continue;
+        }
         let full_path = repo.join(path);
         let Some(changed_at) = change_time(&full_path, repo, cutoff) else {
             continue;
