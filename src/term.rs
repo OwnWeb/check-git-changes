@@ -79,7 +79,7 @@ pub fn read_key() -> Option<Key> {
 }
 
 fn read_arrow_key() -> Option<Key> {
-    // ponytail: a bare Esc press swallows the next two bytes, q and ctrl-c are the documented exits.
+    // A bare Esc press swallows the next two bytes: q and ctrl-c are the documented exits.
     let mut sequence = [0u8; 2];
     std::io::stdin().read_exact(&mut sequence).ok()?;
     Some(match sequence {

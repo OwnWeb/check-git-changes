@@ -50,8 +50,8 @@ same way and test the argument vector, not a real repo.
 
 Tests are in-module `#[cfg(test)] mod tests`, pure functions only, no `tests/` directory.
 
-Numeric literals are named `const`s at the top of the module. `ponytail:` marks a deliberate
-simplification and names its ceiling (`term.rs:82`).
+Numeric literals are named `const`s at the top of the module. A comment on a deliberate shortcut
+names its ceiling and how to lift it (`term.rs:82`).
 
 `interactive.rs` imports crate-private items from the root; `main.rs` items stay non-`pub`.
 

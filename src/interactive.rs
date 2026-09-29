@@ -16,6 +16,7 @@ const ACTION_MENU: &str =
     "action: [p] push branches  [c] commit  [b] commit on new branch  [q] cancel > ";
 const FLAGS_HELP: &str =
     "push flags? (l = --force-with-lease, n = --no-verify, ln = both, empty = none) > ";
+const FLAGS_REJECTED: &str = "expected l, n, ln or nothing";
 const ROWS_RESERVED_FOR_CHROME: usize = 4;
 const FILES_PREVIEW_LIMIT: usize = 10;
 /// Cursor, checkbox, status letter and the gaps around them, before the file path.
@@ -719,8 +720,25 @@ fn ask(question: &str) -> String {
 }
 
 fn ask_push_options() -> PushOptions {
-    let answer = ask(FLAGS_HELP);
-    PushOptions { force_with_lease: answer.contains('l'), no_verify: answer.contains('n') }
+    loop {
+        if let Some(options) = parse_push_options(&ask(FLAGS_HELP)) {
+            return options;
+        }
+        println!("{FLAGS_REJECTED}");
+    }
+}
+
+/// The whole answer has to be a flag word: a substring match would turn "none" into
+/// --no-verify and skip the pre-push hooks without saying so.
+fn parse_push_options(answer: &str) -> Option<PushOptions> {
+    let (force_with_lease, no_verify) = match answer {
+        "" => (false, false),
+        "l" => (true, false),
+        "n" => (false, true),
+        "ln" | "nl" => (true, true),
+        _ => return None,
+    };
+    Some(PushOptions { force_with_lease, no_verify })
 }
 
 #[cfg(test)]
@@ -734,6 +752,17 @@ mod tests {
 
     fn tracked(name: &str) -> Upstream {
         Upstream { remote: "origin".to_string(), remote_ref: format!("refs/heads/{name}") }
+    }
+
+    #[test]
+    fn takes_a_whole_flag_word_only() {
+        let none = parse_push_options("").unwrap();
+        assert!(!none.force_with_lease && !none.no_verify);
+        let both = parse_push_options("nl").unwrap();
+        assert!(both.force_with_lease && both.no_verify);
+        assert!(parse_push_options("n").unwrap().no_verify);
+        assert!(parse_push_options("none").is_none());
+        assert!(parse_push_options("lol").is_none());
     }
 
     #[test]
