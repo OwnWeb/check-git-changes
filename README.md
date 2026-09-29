@@ -110,9 +110,9 @@ z/s move   space select   a select all   d open   enter act   q quit
 | Key | In the repo list | Inside a repo |
 | --- | --- | --- |
 | `z` / `s`, or up / down | Move the cursor | Move the cursor |
-| `space` | Select the repo | Select a file or a branch |
+| `space` | Select the repo | Select a file, a worktree or a branch |
 | `a` | Select or clear every repo | |
-| `d`, or right | Open the repo | Show the diff of a file, the whole diff on `all changes`, or the unpushed commits of a branch |
+| `d`, or right | Open the repo | Show the diff of a file, the whole diff on `all changes` or a worktree, or the unpushed commits of a branch |
 | `enter` | Act on the selection | Act on this repo |
 | `q`, or left | Quit | Back to the list |
 | `ctrl-c` | Quit | Quit |
@@ -144,8 +144,10 @@ action: [p] push branches  [c] commit  [b] commit on new branch  [q] cancel >
 
 * `p` pushes the selected branches, or every unpushed branch of the selected repos. It then asks
   for optional flags: `l` for `--force-with-lease`, `n` for `--no-verify`, `ln` for both.
-* `c` commits, `b` creates a branch first. Each repo asks for its own message, shows
-  `git status --short`, and offers to push afterwards.
+* `c` commits, `b` creates a branch first. Each checkout, the repo or one of its worktrees, asks
+  for its own message, shows `git status --short`, and offers to push afterwards. With nothing
+  selected the commit goes through every checkout showing changes; selecting files or worktrees
+  narrows it to those.
 * Selected files are staged on their own (`git add -- file`), which is how you commit part of a
   repo. With nothing selected the commit stages everything (`git add --all`) except nested repos,
   which would otherwise land as embedded gitlinks, and the preview says which of the two applies.
@@ -162,13 +164,15 @@ ignore, kept only if the file was modified inside the window. A deleted file has
 own, so its nearest surviving parent directory is used instead: removing an entry updates the
 mtime of the directory that held it.
 
-**Worktrees**: each linked worktree of a repo gets its own row, found through the repo's
-`.git/worktrees`, so one checked out under `.claude/worktrees` or next to the repo shows up too.
-The row is named after the main repo and the branch the worktree has checked out
-(`ownweb/claude [OW-701-skill-owasp-mobile]`), or its directory when HEAD is detached. It holds
-the worktree's uncommitted changes and that branch's unpushed commits; every other branch stays on
-the main repo's row. A nested repo is not a change of the repo around it, so its directory is left
-out of that repo's untracked files.
+**Worktrees**: a repo keeps a single row. Its linked worktrees are read from `.git/worktrees`, so
+one checked out under `.claude/worktrees`, next to the repo or outside DIR is found too, and a
+worktree the walk reaches on its own is folded into its main repo. `CHANGES` counts the main
+checkout only. A worktree holding uncommitted changes joins the branches in `UNPUSHED`, named
+after the branch it has checked out (its directory when HEAD is detached) with its file count in
+brackets: `OW-701-skill-owasp-mobile [8 files]`, or `feat ahead 2 (new) [3 files]` when that
+branch also has unpushed commits. Worktrees come first, then the other branches. A nested repo is
+not a change of the repo around it, so its directory is left out of that repo's untracked
+files.
 
 **Unpushed**: a local branch whose last commit falls inside the window and which holds commits
 its remote does not. With an upstream, the count comes from `%(upstream:track)`. Without one, from
@@ -188,8 +192,7 @@ differently named remote branch goes where it should. A branch with no upstream 
 * Binary files count as a changed file with no lines, as git reports no numbers for them.
 * Submodules and nested clones are not followed: the walk stops at the first `.git` it finds.
   Linked worktrees are the exception.
-* A worktree scanned without its main repo (DIR covers the worktree only) shows its own branch,
-  not the repo's other ones.
+* A worktree is committed as a whole (`git add --all`), files inside it cannot be selected.
 * Below roughly 50 columns the repo column gets short enough to be ambiguous. Nothing wraps or
   garbles, but a wider terminal is easier to read.
 * No stash inspection, no hunk staging, no amend.

@@ -98,13 +98,28 @@ struct RepoReport {
     path: PathBuf,
     changes: WorkingTreeChanges,
     unpushed_branches: Vec<UnpushedBranch>,
-    worktree: Option<Worktree>,
+    worktrees: Vec<WorktreeReport>,
 }
 
-/// A linked worktree, labelled after the repo it belongs to and the branch it has checked out.
-struct Worktree {
-    main_repo: PathBuf,
+/// A linked worktree holding uncommitted changes, reported inside its main repo.
+struct WorktreeReport {
+    path: PathBuf,
     branch: Option<String>,
+    changes: WorkingTreeChanges,
+}
+
+impl WorktreeReport {
+    /// A detached worktree has no branch to name, so its directory stands in.
+    fn name(&self) -> String {
+        match &self.branch {
+            Some(branch) => branch.clone(),
+            None => self.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        }
+    }
+
+    fn holds(&self, branch: &UnpushedBranch) -> bool {
+        self.branch.as_deref() == Some(branch.name.as_str())
+    }
 }
 
 /// A linked worktree as its main repo records it, under `.git/worktrees/<id>`.
@@ -113,30 +128,24 @@ struct WorktreeEntry {
     path: PathBuf,
 }
 
-/// Which branches a row lists: a linked worktree the one it has checked out, the main repo
-/// every other one.
-enum BranchScope {
-    CheckedOut(Option<String>),
-    AllBut(Vec<String>),
-}
-
-impl BranchScope {
-    fn includes(&self, name: &str) -> bool {
-        match self {
-            Self::CheckedOut(branch) => branch.as_deref() == Some(name),
-            Self::AllBut(elsewhere) => !elsewhere.iter().any(|branch| branch == name),
-        }
-    }
-}
-
 impl RepoReport {
     fn is_clean(&self) -> bool {
-        self.changes.files.is_empty() && self.unpushed_branches.is_empty()
+        self.changes.files.is_empty()
+            && self.unpushed_branches.is_empty()
+            && self.worktrees.is_empty()
     }
 
     fn last_activity(&self) -> Option<u64> {
         let last_commit = self.unpushed_branches.iter().map(|branch| branch.last_commit).max();
-        self.changes.last_change.max(last_commit)
+        let last_worktree_change =
+            self.worktrees.iter().filter_map(|worktree| worktree.changes.last_change).max();
+        self.changes.last_change.max(last_commit).max(last_worktree_change)
+    }
+
+    fn changed_file_count(&self) -> usize {
+        let in_worktrees: usize =
+            self.worktrees.iter().map(|worktree| worktree.changes.files.len()).sum();
+        self.changes.files.len() + in_worktrees
     }
 }
 
@@ -264,8 +273,8 @@ fn collect_repos(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         return;
     }
     if dir.join(".git").exists() {
-        found.push(dir.to_path_buf());
-        found.extend(worktree_entries(dir).into_iter().map(|entry| entry.path));
+        // A linked worktree is reported inside its main repo, which lists every worktree.
+        found.push(main_repo(dir).unwrap_or_else(|| dir.to_path_buf()));
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -288,7 +297,9 @@ fn collect_repos(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
 /// Worktrees are found through the repo that owns them, wherever they are checked out: the walk
 /// skips dotted directories such as `.claude/worktrees` and never enters a repo.
 fn worktree_entries(repo: &Path) -> Vec<WorktreeEntry> {
-    let Ok(entries) = std::fs::read_dir(repo.join(".git").join("worktrees")) else {
+    // A bare repo is its own git dir.
+    let git_dir = if repo.join(".git").is_dir() { repo.join(".git") } else { repo.to_path_buf() };
+    let Ok(entries) = std::fs::read_dir(git_dir.join("worktrees")) else {
         return Vec::new();
     };
     entries
@@ -305,18 +316,16 @@ fn worktree_entries(repo: &Path) -> Vec<WorktreeEntry> {
 
 /// A linked worktree has a `.git` file pointing at a git dir that holds `commondir`, where a
 /// submodule's points at one that does not.
-fn linked_worktree(repo: &Path) -> Option<Worktree> {
+fn main_repo(repo: &Path) -> Option<PathBuf> {
     let pointer = std::fs::read_to_string(repo.join(".git")).ok()?;
     let git_dir = repo.join(pointer.trim_end().strip_prefix("gitdir: ")?);
     let common_dir = std::fs::read_to_string(git_dir.join("commondir")).ok()?;
     let main_git_dir = std::fs::canonicalize(git_dir.join(common_dir.trim_end())).ok()?;
     // A bare repo is its own git dir, with no working tree around it.
-    let main_repo = if main_git_dir.ends_with(".git") {
-        main_git_dir.parent()?.to_path_buf()
-    } else {
-        main_git_dir
-    };
-    Some(Worktree { main_repo, branch: checked_out_branch(&git_dir) })
+    if !main_git_dir.ends_with(".git") {
+        return Some(main_git_dir);
+    }
+    main_git_dir.parent().map(Path::to_path_buf)
 }
 
 fn checked_out_branch(git_dir: &Path) -> Option<String> {
@@ -324,18 +333,6 @@ fn checked_out_branch(git_dir: &Path) -> Option<String> {
     head.trim_end().strip_prefix("ref: refs/heads/").map(str::to_string)
 }
 
-/// A worktree scanned without its main repo lists its own branch only: widen DIR to include
-/// the main repo for the others.
-fn branch_scope(repo: &Path, worktree: Option<&Worktree>) -> BranchScope {
-    if let Some(worktree) = worktree {
-        return BranchScope::CheckedOut(worktree.branch.clone());
-    }
-    let checked_out_elsewhere = worktree_entries(repo)
-        .iter()
-        .filter_map(|entry| checked_out_branch(&entry.git_dir))
-        .collect();
-    BranchScope::AllBut(checked_out_elsewhere)
-}
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -354,13 +351,25 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn scan_repo(repo: &Path, cutoff: u64) -> RepoReport {
-    let worktree = linked_worktree(repo);
-    let scope = branch_scope(repo, worktree.as_ref());
+    let mut worktrees: Vec<WorktreeReport> = worktree_entries(repo)
+        .iter()
+        .map(|entry| scan_worktree(entry, cutoff))
+        .filter(|worktree| !worktree.changes.files.is_empty())
+        .collect();
+    worktrees.sort_by_key(|worktree| std::cmp::Reverse(worktree.changes.last_change));
     RepoReport {
         path: repo.to_path_buf(),
         changes: scan_working_tree(repo, cutoff),
-        unpushed_branches: scan_branches(repo, cutoff, &scope),
-        worktree,
+        unpushed_branches: scan_branches(repo, cutoff),
+        worktrees,
+    }
+}
+
+fn scan_worktree(entry: &WorktreeEntry, cutoff: u64) -> WorktreeReport {
+    WorktreeReport {
+        path: entry.path.clone(),
+        branch: checked_out_branch(&entry.git_dir),
+        changes: scan_working_tree(&entry.path, cutoff),
     }
 }
 
@@ -446,12 +455,9 @@ fn count_lines(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn scan_branches(repo: &Path, cutoff: u64, scope: &BranchScope) -> Vec<UnpushedBranch> {
+fn scan_branches(repo: &Path, cutoff: u64) -> Vec<UnpushedBranch> {
     let refs = git(repo, &["for-each-ref", BRANCH_FORMAT, "refs/heads"]).unwrap_or_default();
-    refs.lines()
-        .filter(|line| scope.includes(line.split('\t').next().unwrap_or_default()))
-        .filter_map(|line| parse_branch(repo, line, cutoff))
-        .collect()
+    refs.lines().filter_map(|line| parse_branch(repo, line, cutoff)).collect()
 }
 
 fn parse_branch(repo: &Path, line: &str, cutoff: u64) -> Option<UnpushedBranch> {
@@ -491,19 +497,7 @@ fn count_commits_missing_from_remotes(repo: &Path, branch: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn repo_label(report: &RepoReport, root: &Path) -> String {
-    let Some(worktree) = &report.worktree else {
-        return path_label(&report.path, root);
-    };
-    // A detached worktree has no branch to name, so its directory stands in.
-    let checkout = match &worktree.branch {
-        Some(branch) => branch.clone(),
-        None => report.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-    };
-    format!("{} [{checkout}]", path_label(&worktree.main_repo, root))
-}
-
-fn path_label(path: &Path, root: &Path) -> String {
+fn repo_label(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
@@ -615,9 +609,9 @@ fn table_row(
     layout: &TableLayout,
 ) -> Vec<Cell> {
     let mut cells = vec![
-        Cell::plain(truncate_start(&repo_label(report, root), layout.limits.repo)),
+        Cell::plain(truncate_start(&repo_label(&report.path, root), layout.limits.repo)),
         changes_cell(&report.changes, palette),
-        unpushed_cell(&report.unpushed_branches, palette, layout.limits.unpushed),
+        unpushed_cell(report, palette, layout.limits.unpushed),
     ];
     if layout.with_date {
         let last_activity =
@@ -660,17 +654,37 @@ fn changes_text(changes: &WorkingTreeChanges) -> String {
     )
 }
 
-fn unpushed_cell(branches: &[UnpushedBranch], palette: &Palette, max_width: usize) -> Cell {
-    if branches.is_empty() {
+fn unpushed_cell(report: &RepoReport, palette: &Palette, max_width: usize) -> Cell {
+    if report.unpushed_branches.is_empty() && report.worktrees.is_empty() {
         return Cell::plain(EMPTY_CELL);
     }
-    let plain = truncate_end(&unpushed_text(branches, max_width), max_width);
+    let plain = truncate_end(&unpushed_text(report, max_width), max_width);
     Cell::colored(plain.clone(), format!("{}{}{}", palette.yellow, plain, palette.reset))
 }
 
-fn unpushed_text(branches: &[UnpushedBranch], max_width: usize) -> String {
-    let labels: Vec<String> = branches.iter().map(describe_branch).collect();
-    join_within_width(&labels, max_width)
+fn unpushed_text(report: &RepoReport, max_width: usize) -> String {
+    join_within_width(&unpushed_labels(report), max_width)
+}
+
+/// Worktrees first, each with the unpushed commits of its branch, then the branches no listed
+/// worktree has checked out.
+fn unpushed_labels(report: &RepoReport) -> Vec<String> {
+    let worktrees = report.worktrees.iter().map(|worktree| {
+        let branch = report.unpushed_branches.iter().find(|branch| worktree.holds(branch));
+        describe_worktree(worktree, branch)
+    });
+    let branches = report
+        .unpushed_branches
+        .iter()
+        .filter(|branch| !report.worktrees.iter().any(|worktree| worktree.holds(branch)))
+        .map(describe_branch);
+    worktrees.chain(branches).collect()
+}
+
+fn describe_worktree(worktree: &WorktreeReport, branch: Option<&UnpushedBranch>) -> String {
+    let count = worktree.changes.files.len();
+    let name = branch.map(describe_branch).unwrap_or_else(|| worktree.name());
+    format!("{name} [{count} file{}]", plural(count))
 }
 
 struct ColumnLimits {
@@ -697,12 +711,12 @@ impl TableLayout {
 /// shortenable columns can no longer hold their minimum, then names get trimmed.
 fn table_layout(reports: &[RepoReport], context: &ScanContext, has_prefix: bool) -> TableLayout {
     let natural_repo = widest(
-        reports.iter().map(|report| repo_label(report, &context.root).chars().count()),
+        reports.iter().map(|report| repo_label(&report.path, &context.root).chars().count()),
         TABLE_HEADERS[0],
     );
     let natural_unpushed = widest(
         reports.iter().map(|report| {
-            unpushed_text(&report.unpushed_branches, UNPUSHED_CELL_MAX_WIDTH).chars().count()
+            unpushed_text(report, UNPUSHED_CELL_MAX_WIDTH).chars().count()
         }),
         TABLE_HEADERS[2],
     );
@@ -815,7 +829,7 @@ fn plural(count: usize) -> &'static str {
 }
 
 fn summary_line(reports: &[RepoReport], context: &ScanContext, palette: &Palette) -> String {
-    let changed_files: usize = reports.iter().map(|report| report.changes.files.len()).sum();
+    let changed_files: usize = reports.iter().map(RepoReport::changed_file_count).sum();
     let unpushed_branches: usize = reports.iter().map(|report| report.unpushed_branches.len()).sum();
     let full = format!(
         "{} repo(s) with activity in the last {} out of {} scanned: {} file(s), {} unpushed branch(es), {:.0?}",
@@ -918,36 +932,42 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 mod tests {
     use super::*;
 
-    fn worktree_report(branch: Option<&str>) -> RepoReport {
-        let changes =
-            WorkingTreeChanges { files: Vec::new(), nested_repos: Vec::new(), last_change: None };
-        RepoReport {
-            path: PathBuf::from("/dev/claude-wt"),
-            changes,
-            unpushed_branches: Vec::new(),
-            worktree: Some(Worktree {
-                main_repo: PathBuf::from("/dev/claude"),
-                branch: branch.map(str::to_string),
-            }),
-        }
+    fn no_changes() -> WorkingTreeChanges {
+        WorkingTreeChanges { files: Vec::new(), nested_repos: Vec::new(), last_change: None }
+    }
+
+    fn one_file() -> WorkingTreeChanges {
+        let file = ChangedFile {
+            path: "a.rs".to_string(),
+            added_lines: 1,
+            removed_lines: 0,
+            untracked: false,
+            deleted: false,
+        };
+        WorkingTreeChanges { files: vec![file], ..no_changes() }
+    }
+
+    fn unpushed(name: &str) -> UnpushedBranch {
+        UnpushedBranch { name: name.to_string(), ahead: 2, last_commit: 0, upstream: None }
     }
 
     #[test]
-    fn gives_each_checked_out_branch_to_its_worktree() {
-        let worktree = BranchScope::CheckedOut(Some("feat".to_string()));
-        assert!(worktree.includes("feat"));
-        assert!(!worktree.includes("main"));
-        assert!(!BranchScope::CheckedOut(None).includes("main"));
-        let main_repo = BranchScope::AllBut(vec!["feat".to_string()]);
-        assert!(main_repo.includes("main"));
-        assert!(!main_repo.includes("feat"));
-    }
-
-    #[test]
-    fn labels_a_worktree_after_its_repo_and_branch() {
-        let root = Path::new("/dev");
-        assert_eq!(repo_label(&worktree_report(Some("OW-701")), root), "claude [OW-701]");
-        assert_eq!(repo_label(&worktree_report(None), root), "claude [claude-wt]");
+    fn lists_worktrees_with_the_branches() {
+        let worktree = |branch: Option<&str>, path: &str| WorktreeReport {
+            path: PathBuf::from(path),
+            branch: branch.map(str::to_string),
+            changes: one_file(),
+        };
+        let report = RepoReport {
+            path: PathBuf::from("/dev/claude"),
+            changes: no_changes(),
+            unpushed_branches: vec![unpushed("main"), unpushed("feat")],
+            worktrees: vec![worktree(Some("feat"), "/dev/claude-feat"), worktree(None, "/dev/wip")],
+        };
+        assert_eq!(
+            unpushed_labels(&report),
+            ["feat ahead 2 (new) [1 file]", "wip [1 file]", "main ahead 2 (new)"]
+        );
     }
 
     #[test]

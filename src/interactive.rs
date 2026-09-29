@@ -2,6 +2,7 @@ use crate::term::{self, Key, RawTerminal, Screen};
 use crate::{
     build_table, display_path, format_local, git, local_offset_seconds, repo_label, scan_repo,
     summary_line, Cell, ChangedFile, Palette, RepoReport, ScanContext, UnpushedBranch,
+    WorkingTreeChanges, WorktreeReport,
 };
 use std::io::Write;
 use std::path::Path;
@@ -34,12 +35,14 @@ struct PushOptions {
 enum DetailRow {
     AllChanges,
     File(usize),
+    Worktree(usize),
     Branch(usize),
 }
 
 struct Selection {
     repo: bool,
     files: Vec<bool>,
+    worktrees: Vec<bool>,
     branches: Vec<bool>,
 }
 
@@ -48,9 +51,16 @@ impl Selection {
         Self {
             repo: false,
             files: vec![false; report.changes.files.len()],
+            worktrees: vec![false; report.worktrees.len()],
             branches: vec![false; report.unpushed_branches.len()],
         }
     }
+}
+
+/// The checkouts a commit goes through, each asking for its own message.
+struct CommitScope {
+    main_checkout: bool,
+    worktrees: Vec<usize>,
 }
 
 struct Browser {
@@ -151,6 +161,7 @@ impl Browser {
         match row {
             DetailRow::AllChanges => selection.repo = !selection.repo,
             DetailRow::File(index) => selection.files[index] = !selection.files[index],
+            DetailRow::Worktree(index) => selection.worktrees[index] = !selection.worktrees[index],
             DetailRow::Branch(index) => selection.branches[index] = !selection.branches[index],
         }
     }
@@ -177,6 +188,7 @@ impl Browser {
             rows.push(DetailRow::AllChanges);
             rows.extend((0..report.changes.files.len()).map(DetailRow::File));
         }
+        rows.extend((0..report.worktrees.len()).map(DetailRow::Worktree));
         rows.extend((0..report.unpushed_branches.len()).map(DetailRow::Branch));
         if rows.is_empty() {
             rows.push(DetailRow::AllChanges);
@@ -249,14 +261,13 @@ impl Browser {
     fn summarize(&self, report: &RepoReport) -> String {
         let mut parts = Vec::new();
         if !report.changes.files.is_empty() {
+            parts.push(self.describe_changes(&report.changes));
+        }
+        if !report.worktrees.is_empty() {
             parts.push(format!(
-                "{} file(s) {}+{}{} {}-{}{}",
-                report.changes.files.len(),
-                self.palette.green,
-                report.changes.added_lines(),
-                self.palette.reset,
-                self.palette.red,
-                report.changes.removed_lines(),
+                "{}{} worktree(s) with changes{}",
+                self.palette.yellow,
+                report.worktrees.len(),
                 self.palette.reset
             ));
         }
@@ -269,6 +280,19 @@ impl Browser {
             ));
         }
         parts.join("  ")
+    }
+
+    fn describe_changes(&self, changes: &WorkingTreeChanges) -> String {
+        format!(
+            "{} file(s) {}+{}{} {}-{}{}",
+            changes.files.len(),
+            self.palette.green,
+            changes.added_lines(),
+            self.palette.reset,
+            self.palette.red,
+            changes.removed_lines(),
+            self.palette.reset
+        )
     }
 
     fn detail_lines(
@@ -285,7 +309,7 @@ impl Browser {
         let header = format!(
             "{}{}{}",
             self.palette.bold,
-            repo_label(report, &self.context.root),
+            repo_label(&report.path, &self.context.root),
             self.palette.reset
         );
         let mut lines = vec![header];
@@ -296,6 +320,10 @@ impl Browser {
                 DetailRow::File(file) => (
                     selection.files[file],
                     self.describe_file(&report.changes.files[file], columns),
+                ),
+                DetailRow::Worktree(worktree) => (
+                    selection.worktrees[worktree],
+                    self.describe_worktree_row(&report.worktrees[worktree]),
                 ),
                 DetailRow::Branch(branch) => (
                     selection.branches[branch],
@@ -325,6 +353,19 @@ impl Browser {
             self.palette.reset,
             self.palette.red,
             file.removed_lines,
+            self.palette.reset
+        )
+    }
+
+    fn describe_worktree_row(&self, worktree: &WorktreeReport) -> String {
+        format!(
+            "{}{}{} worktree  {}  {}{}{}",
+            self.palette.yellow,
+            worktree.name(),
+            self.palette.reset,
+            self.describe_changes(&worktree.changes),
+            self.palette.dim,
+            display_path(&worktree.path),
             self.palette.reset
         )
     }
@@ -364,7 +405,11 @@ impl Browser {
     }
 
     fn show_diff(&mut self, terminal: &RawTerminal, repo: usize, row: DetailRow) {
-        let path = self.reports[repo].path.clone();
+        let report = &self.reports[repo];
+        let path = match row {
+            DetailRow::Worktree(index) => report.worktrees[index].path.clone(),
+            _ => report.path.clone(),
+        };
         let args = self.diff_args(repo, row);
         self.screen.clear();
         terminal.suspended(|| {
@@ -376,7 +421,9 @@ impl Browser {
     fn diff_args(&self, repo: usize, row: DetailRow) -> Vec<String> {
         let report = &self.reports[repo];
         match row {
-            DetailRow::AllChanges => vec!["diff".to_string(), "HEAD".to_string()],
+            DetailRow::AllChanges | DetailRow::Worktree(_) => {
+                vec!["diff".to_string(), "HEAD".to_string()]
+            }
             DetailRow::File(index) => diff_file_args(&report.changes.files[index]),
             DetailRow::Branch(index) => log_branch_args(&report.unpushed_branches[index]),
         }
@@ -442,33 +489,15 @@ impl Browser {
     }
 
     fn commit_repo(&self, target: usize, on_new_branch: bool) {
-        let repo = &self.reports[target].path;
-        println!("\n{}", display_path(repo));
-        print!("{}", git(repo, &["status", "--short"]).unwrap_or_default());
-
-        if on_new_branch {
-            let branch = ask("new branch name? (empty = skip this repo) > ");
-            if branch.is_empty() {
-                return;
-            }
-            if !run_git(repo, &["checkout".to_string(), "-b".to_string(), branch]) {
-                return;
-            }
+        let report = &self.reports[target];
+        let scope = commit_scope(report, &self.selections[target]);
+        if scope.main_checkout {
+            commit_checkout(&report.path, &self.stage_args(target), on_new_branch);
         }
-
-        let message = ask("commit message? (empty = skip this repo) > ");
-        if message.is_empty() {
-            println!("skipped");
-            return;
-        }
-        if !run_git(repo, &self.stage_args(target)) {
-            return;
-        }
-        if !run_git(repo, &["commit".to_string(), "--message".to_string(), message]) {
-            return;
-        }
-        if ask("push now? [y/N] > ").eq_ignore_ascii_case("y") {
-            push_head(repo, &ask_push_options());
+        for &index in &scope.worktrees {
+            let worktree = &report.worktrees[index];
+            let stage_args = stage_all_args(&worktree.changes.nested_repos);
+            commit_checkout(&worktree.path, &stage_args, on_new_branch);
         }
     }
 
@@ -485,18 +514,41 @@ impl Browser {
     fn preview(&self, targets: &[usize]) {
         for &target in targets {
             let report = &self.reports[target];
-            println!("\n{}", repo_label(report, &self.context.root));
-            self.preview_files(target);
+            println!("\n{}", repo_label(&report.path, &self.context.root));
+            let scope = commit_scope(report, &self.selections[target]);
+            if scope.main_checkout {
+                self.preview_files(target);
+            }
+            for &index in &scope.worktrees {
+                self.preview_worktree(&report.worktrees[index]);
+            }
             self.preview_branches(target);
         }
     }
 
     fn preview_files(&self, target: usize) {
-        let files = self.files_to_commit(target);
+        let staging = if self.has_selected_files(target) { "selected" } else { "add --all" };
+        self.print_files(&self.files_to_commit(target), staging);
+    }
+
+    fn preview_worktree(&self, worktree: &WorktreeReport) {
+        println!(
+            "  {}{}{} worktree  {}{}{}",
+            self.palette.yellow,
+            worktree.name(),
+            self.palette.reset,
+            self.palette.dim,
+            display_path(&worktree.path),
+            self.palette.reset
+        );
+        let files: Vec<&ChangedFile> = worktree.changes.files.iter().collect();
+        self.print_files(&files, "add --all");
+    }
+
+    fn print_files(&self, files: &[&ChangedFile], staging: &str) {
         if files.is_empty() {
             return;
         }
-        let staging = if self.has_selected_files(target) { "selected" } else { "add --all" };
         println!("  {} file(s) [{}]", files.len(), staging);
         for file in files.iter().take(FILES_PREVIEW_LIMIT) {
             println!(
@@ -581,6 +633,56 @@ impl Browser {
         self.reports = reports;
         self.selections = selections;
         self.cursor = self.cursor.min(self.reports.len().saturating_sub(1));
+    }
+}
+
+/// With nothing selected a commit goes through every checkout showing changes, otherwise
+/// through the selected files and worktrees only.
+fn commit_scope(report: &RepoReport, selection: &Selection) -> CommitScope {
+    let files_selected = selection.files.contains(&true);
+    if !files_selected && !selection.worktrees.contains(&true) {
+        return CommitScope {
+            main_checkout: !report.changes.files.is_empty(),
+            worktrees: (0..report.worktrees.len()).collect(),
+        };
+    }
+    let selected_worktrees = selection
+        .worktrees
+        .iter()
+        .enumerate()
+        .filter(|(_, selected)| **selected)
+        .map(|(index, _)| index)
+        .collect();
+    CommitScope { main_checkout: files_selected, worktrees: selected_worktrees }
+}
+
+fn commit_checkout(repo: &Path, stage_args: &[String], on_new_branch: bool) {
+    println!("\n{}", display_path(repo));
+    print!("{}", git(repo, &["status", "--short"]).unwrap_or_default());
+
+    if on_new_branch {
+        let branch = ask("new branch name? (empty = skip this repo) > ");
+        if branch.is_empty() {
+            return;
+        }
+        if !run_git(repo, &["checkout".to_string(), "-b".to_string(), branch]) {
+            return;
+        }
+    }
+
+    let message = ask("commit message? (empty = skip this repo) > ");
+    if message.is_empty() {
+        println!("skipped");
+        return;
+    }
+    if !run_git(repo, stage_args) {
+        return;
+    }
+    if !run_git(repo, &["commit".to_string(), "--message".to_string(), message]) {
+        return;
+    }
+    if ask("push now? [y/N] > ").eq_ignore_ascii_case("y") {
+        push_head(repo, &ask_push_options());
     }
 }
 
@@ -801,6 +903,40 @@ mod tests {
             log_branch_args(&branch("feat/x", None)),
             ["log", "--stat", "feat/x", "--not", "--remotes"]
         );
+    }
+
+    #[test]
+    fn commits_the_selection_or_every_checkout_with_changes() {
+        let changes = || {
+            let file = ChangedFile {
+                path: "a.rs".into(),
+                added_lines: 1,
+                removed_lines: 0,
+                untracked: false,
+                deleted: false,
+            };
+            WorkingTreeChanges { files: vec![file], nested_repos: Vec::new(), last_change: None }
+        };
+        let worktree = WorktreeReport { path: "/wt".into(), branch: None, changes: changes() };
+        let report = RepoReport {
+            path: "/repo".into(),
+            changes: changes(),
+            unpushed_branches: Vec::new(),
+            worktrees: vec![worktree],
+        };
+
+        let mut selection = Selection::for_report(&report);
+        let everything = commit_scope(&report, &selection);
+        assert!(everything.main_checkout && everything.worktrees == [0]);
+
+        selection.worktrees[0] = true;
+        let worktree_only = commit_scope(&report, &selection);
+        assert!(!worktree_only.main_checkout && worktree_only.worktrees == [0]);
+
+        selection = Selection::for_report(&report);
+        selection.files[0] = true;
+        let files_only = commit_scope(&report, &selection);
+        assert!(files_only.main_checkout && files_only.worktrees.is_empty());
     }
 
     #[test]

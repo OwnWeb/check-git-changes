@@ -8,10 +8,9 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Linked worktrees get their own row, wherever they are checked out, named after the main repo
-  and the branch they have checked out (`repo [branch]`). The row holds the worktree's
-  uncommitted changes and that branch's unpushed commits; other branches stay on the main repo's
-  row.
+- Linked worktrees are reported inside their main repo's row, wherever they are checked out: a
+  worktree holding changes joins the branches in `UNPUSHED` as `branch [n files]`. Inside a repo,
+  a worktree can be selected, diffed and committed.
 
 ### Changed
 

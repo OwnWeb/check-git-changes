@@ -22,8 +22,9 @@ CI runs `cargo test` alone on ubuntu and macos: no clippy or fmt gate, no `rustf
 `main.rs` scan + table, `interactive.rs` browser + git writes, `term.rs` raw mode, keys, redraw.
 
 `main()`: `collect_repos` walks sequentially and stops at the first `.git`, then `rayon` runs
-`scan_repo` per repo (3 git calls each: `diff --numstat HEAD`, `ls-files --others`, `for-each-ref`).
-A fourth call multiplies across every repo.
+`scan_repo` per repo (3 git calls each: `diff --numstat HEAD`, `ls-files --others`, `for-each-ref`,
+plus the first two per linked worktree, listed from `.git/worktrees` without a git call). A fourth
+call multiplies across every repo. A linked worktree the walk reaches is mapped to its main repo.
 
 Two git paths, on purpose. Reads go through `git()` (`main.rs:248`), which captures stdout and
 returns `None` on non-zero exit. Writes go through `run_git()` (`interactive.rs:700`), which prints
