@@ -285,7 +285,7 @@ impl Browser {
         let header = format!(
             "{}{}{}",
             self.palette.bold,
-            repo_label(&report.path, &self.context.root),
+            repo_label(report, &self.context.root),
             self.palette.reset
         );
         let mut lines = vec![header];
@@ -485,7 +485,7 @@ impl Browser {
     fn preview(&self, targets: &[usize]) {
         for &target in targets {
             let report = &self.reports[target];
-            println!("\n{}", repo_label(&report.path, &self.context.root));
+            println!("\n{}", repo_label(report, &self.context.root));
             self.preview_files(target);
             self.preview_branches(target);
         }
