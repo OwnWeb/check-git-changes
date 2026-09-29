@@ -142,8 +142,10 @@ orgC/repoE
 action: [p] push branches  [c] commit  [b] commit on new branch  [q] cancel >
 ```
 
-* `p` pushes the selected branches, or every unpushed branch of the selected repos. It then asks
-  for optional flags: `l` for `--force-with-lease`, `n` for `--no-verify`, `ln` for both.
+* `p` pushes the selected branches and the ones the selected worktrees have checked out, or every
+  unpushed branch of the selected repos. It then asks for optional flags: `l` for
+  `--force-with-lease`, `n` for `--no-verify`, `ln` for both. A worktree holds no commits of its
+  own: its branch is shared with the repo, so it is pushed like any other.
 * `c` commits, `b` creates a branch first. Each checkout, the repo or one of its worktrees, asks
   for its own message, shows `git status --short`, and offers to push afterwards. With nothing
   selected the commit goes through every checkout showing changes; selecting files or worktrees

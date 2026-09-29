@@ -10,7 +10,7 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Linked worktrees are reported inside their main repo's row, wherever they are checked out: a
   worktree holding changes joins the branches in `UNPUSHED` as `branch [n files]`. Inside a repo,
-  a worktree can be selected, diffed and committed.
+  a worktree can be selected, diffed, committed, and its branch pushed.
 
 ### Changed
 

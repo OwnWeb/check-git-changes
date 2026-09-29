@@ -467,19 +467,7 @@ impl Browser {
     }
 
     fn branches_to_push(&self, target: usize) -> Vec<&UnpushedBranch> {
-        let branches = &self.reports[target].unpushed_branches;
-        let selection = &self.selections[target].branches;
-        let chosen: Vec<&UnpushedBranch> = branches
-            .iter()
-            .zip(selection)
-            .filter(|(_, selected)| **selected)
-            .map(|(branch, _)| branch)
-            .collect();
-        if chosen.is_empty() {
-            branches.iter().collect()
-        } else {
-            chosen
-        }
+        push_scope(&self.reports[target], &self.selections[target])
     }
 
     fn commit_targets(&self, targets: &[usize], on_new_branch: bool) {
@@ -654,6 +642,29 @@ fn commit_scope(report: &RepoReport, selection: &Selection) -> CommitScope {
         .map(|(index, _)| index)
         .collect();
     CommitScope { main_checkout: files_selected, worktrees: selected_worktrees }
+}
+
+/// With nothing selected a push covers every unpushed branch, otherwise the selected branches
+/// and the ones the selected worktrees have checked out.
+fn push_scope<'a>(report: &'a RepoReport, selection: &Selection) -> Vec<&'a UnpushedBranch> {
+    let nothing_selected =
+        !selection.branches.contains(&true) && !selection.worktrees.contains(&true);
+    let held_by_selected_worktree = |branch: &UnpushedBranch| {
+        report
+            .worktrees
+            .iter()
+            .zip(&selection.worktrees)
+            .any(|(worktree, selected)| *selected && worktree.holds(branch))
+    };
+    report
+        .unpushed_branches
+        .iter()
+        .zip(&selection.branches)
+        .filter(|(branch, selected)| {
+            nothing_selected || **selected || held_by_selected_worktree(branch)
+        })
+        .map(|(branch, _)| branch)
+        .collect()
 }
 
 fn commit_checkout(repo: &Path, stage_args: &[String], on_new_branch: bool) {
@@ -937,6 +948,38 @@ mod tests {
         selection.files[0] = true;
         let files_only = commit_scope(&report, &selection);
         assert!(files_only.main_checkout && files_only.worktrees.is_empty());
+    }
+
+    #[test]
+    fn pushes_the_branch_of_a_selected_worktree() {
+        let no_changes = || WorkingTreeChanges {
+            files: Vec::new(),
+            nested_repos: Vec::new(),
+            last_change: None,
+        };
+        let worktree = WorktreeReport {
+            path: "/wt".into(),
+            branch: Some("feat".into()),
+            changes: no_changes(),
+        };
+        let report = RepoReport {
+            path: "/repo".into(),
+            changes: no_changes(),
+            unpushed_branches: vec![branch("main", None), branch("feat", None)],
+            worktrees: vec![worktree],
+        };
+        let names = |selection: &Selection| -> Vec<String> {
+            push_scope(&report, selection).iter().map(|branch| branch.name.clone()).collect()
+        };
+
+        let mut selection = Selection::for_report(&report);
+        assert_eq!(names(&selection), ["main", "feat"]);
+        selection.worktrees[0] = true;
+        assert_eq!(names(&selection), ["feat"]);
+        selection.branches[0] = true;
+        assert_eq!(names(&selection), ["main", "feat"]);
+        selection.worktrees[0] = false;
+        assert_eq!(names(&selection), ["main"]);
     }
 
     #[test]
