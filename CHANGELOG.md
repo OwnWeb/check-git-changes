@@ -6,9 +6,20 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Linked worktrees are reported inside their main repo's row, wherever they are checked out: a
+  worktree holding changes joins the branches in `UNPUSHED` as `branch [n files]`. Inside a repo,
+  a worktree can be selected, diffed, committed, and its branch pushed.
+
 ### Changed
 
 - GitHub actions bumped off the Node 20 runtime.
+
+### Fixed
+
+- A nested repo, such as a worktree under `.claude/worktrees`, no longer shows as an untracked
+  `+0 -0` file of the repo around it, and `add --all` no longer stages it as an embedded gitlink.
 
 ## [0.1.0] 2026-09-09
 
